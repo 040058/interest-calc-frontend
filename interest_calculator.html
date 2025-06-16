@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>個人儲蓄統計</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f7f7f7; padding: 40px; }
+        .container { background: #fff; padding: 30px; border-radius: 10px; max-width: 1200px; margin: auto; box-shadow: 0 2px 8px #ccc; }
+        label { display: block; margin-top: 15px; }
+        input, select { width: 100%; padding: 8px; margin-top: 5px; border-radius: 5px; border: 1px solid #ccc; }
+        .result { margin-top: 25px; font-size: 1.2em; color: #00796b; }
+        #accounts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .account-card {
+            background: #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 4px #bbb;
+            flex: 1 1 350px;
+            min-width: 320px;
+            max-width: 400px;
+            box-sizing: border-box;
+        }
+        @media (max-width: 800px) {
+            #accounts { flex-direction: column; }
+            .account-card { max-width: 100%; min-width: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="login-modal" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:1000;">
+        <div style="background:#fff;padding:30px 40px;border-radius:10px;box-shadow:0 2px 8px #888;min-width:300px;">
+            <h3>登入</h3>
+            <label>帳號 <input type="text" id="login-user" autocomplete="username"></label><br><br>
+            <label>密碼 <input type="password" id="login-pw" autocomplete="current-password"></label><br><br>
+            <button id="login-btn">登入</button>
+            <div id="login-err" style="color:red;margin-top:10px;display:none;">帳號或密碼錯誤</div>
+        </div>
+    </div>
+    <div class="container" id="main-content" style="display:none;">
+        <h2>個人儲蓄統計</h2>
+        <form id="add-form" style="margin-bottom: 30px;">
+            <label>存款人姓名 <input type="text" id="name" required></label>
+            <label>月利率（%） <input type="number" id="rate" min="0" step="0.01" required></label>
+            <button type="submit">新增存款人</button>
+        </form>
+        <div id="accounts"></div>
+    </div>
+    <template id="record-row">
+        <tr>
+            <td class="date"></td>
+            <td class="type"></td>
+            <td class="amount"></td>
+        </tr>
+    </template>
+    <script>
+        function formatTWD(num) {
+            return 'NT$' + num.toLocaleString('zh-Hant-TW', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+        }
+
+        // 存款人資料陣列
+        let accounts = [];
+
+        async function fetchAccounts() {
+            const res = await fetch('https://kids-account.onrender.com/api/accounts');
+            accounts = await res.json();
+        }
+        async function addAccount(name, rate) {
+            await fetch('https://kids-account.onrender.com/api/accounts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, rate })
+            });
+        }
+        async function updateAccount(idx, account) {
+            await fetch(`https://kids-account.onrender.com/api/accounts/${idx}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(account)
+            });
+        }
+        async function deleteAccount(idx) {
+            await fetch(`https://kids-account.onrender.com/api/accounts/${idx}`, {
+                method: 'DELETE'
+            });
+        }
+
+        function getNextInterestDate(startDate, fromDate) {
+            // 回傳 fromDate 之後的下一個 25 號
+            let d = new Date(startDate);
+            if (d.getDate() > 25) d.setMonth(d.getMonth() + 1);
+            d.setDate(25);
+            while (d < fromDate) {
+                d.setMonth(d.getMonth() + 1);
+            }
+            return d;
+        }
+
+        function calcWithRecords(records, rate) {
+            // 依據紀錄計算每月25號複利，並完整條列
+            if (!records.length) return { total: 0, history: [] };
+            // 先依日期排序
+            records = records.slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+            let balance = 0;
+            let history = [];
+            let idx = 0;
+            let current = new Date(records[0].date);
+            let today = new Date();
+            // 計算到本月25號或今天
+            let endDate = new Date(today);
+            if (today.getDate() < 25) {
+                endDate.setMonth(endDate.getMonth() - 1);
+            }
+            endDate.setDate(25);
+            // 逐月25號計息
+            while (current <= endDate) {
+                // 處理本月所有紀錄
+                while (idx < records.length && new Date(records[idx].date) <= current) {
+                    const rec = records[idx];
+                    if (rec.type === '存入') balance += rec.amount;
+                    else if (rec.type === '領出') balance -= rec.amount;
+                    history.push({ date: rec.date, type: rec.type, amount: rec.amount, balance: balance });
+                    idx++;
+                }
+                // 當月25號計息
+                if (balance > 0) {
+                    const interest = balance * (rate / 100);
+                    balance += interest;
+                    history.push({ date: current.toISOString().slice(0,10), type: '利息', amount: Math.round(interest), balance: Math.round(balance) });
+                }
+                // 下個月25號
+                current.setMonth(current.getMonth() + 1);
+                current.setDate(25);
+            }
+            // 處理剩餘紀錄
+            while (idx < records.length) {
+                const rec = records[idx];
+                if (rec.type === '存入') balance += rec.amount;
+                else if (rec.type === '領出') balance -= rec.amount;
+                history.push({ date: rec.date, type: rec.type, amount: rec.amount, balance: balance });
+                idx++;
+            }
+            return { total: Math.round(balance), history };
+        }
+
+        let editIndex = null;
+        let editAccount = null;
+        let hasUnsaved = false;
+
+        // 登入功能
+        window.addEventListener('DOMContentLoaded', function() {
+            const modal = document.getElementById('login-modal');
+            const main = document.getElementById('main-content');
+            document.getElementById('login-btn').onclick = function() {
+                const user = document.getElementById('login-user').value.trim();
+                const pw = document.getElementById('login-pw').value;
+                if (user === 'admin' && pw === 'admin') {
+                    modal.style.display = 'none';
+                    main.style.display = '';
+                } else {
+                    document.getElementById('login-err').style.display = '';
+                }
+            };
+            document.getElementById('login-pw').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') document.getElementById('login-btn').click();
+            });
+            document.getElementById('login-user').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') document.getElementById('login-btn').click();
+            });
+        });
+
+        // 離開前確認彈窗
+        function showLeaveConfirm(cb) {
+            let confirmDiv = document.getElementById('leave-confirm-modal');
+            if (!confirmDiv) {
+                confirmDiv = document.createElement('div');
+                confirmDiv.id = 'leave-confirm-modal';
+                confirmDiv.style = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:2000;';
+                confirmDiv.innerHTML = `
+                    <div style="background:#fff;padding:30px 40px;border-radius:10px;box-shadow:0 2px 8px #888;min-width:320px;">
+                        <h3>尚有未儲存變更</h3>
+                        <p>您有尚未儲存的變更，請選擇：</p>
+                        <button id="leave-save">儲存變更</button>
+                        <button id="leave-cancel">取消變更</button>
+                        <button id="leave-exit">直接離開</button>
+                    </div>
+                `;
+                document.body.appendChild(confirmDiv);
+            }
+            confirmDiv.style.display = '';
+            confirmDiv.querySelector('#leave-save').onclick = function() {
+                if (typeof cb === 'function') cb('save');
+                confirmDiv.style.display = 'none';
+            };
+            confirmDiv.querySelector('#leave-cancel').onclick = function() {
+                if (typeof cb === 'function') cb('cancel');
+                confirmDiv.style.display = 'none';
+            };
+            confirmDiv.querySelector('#leave-exit').onclick = function() {
+                if (typeof cb === 'function') cb('exit');
+                confirmDiv.style.display = 'none';
+            };
+        }
+
+        window.addEventListener('beforeunload', function(e) {
+            if (hasUnsaved) {
+                e.preventDefault();
+                e.returnValue = '';
+                // 部分瀏覽器會顯示預設提示
+                return '';
+            }
+        });
+
+        // 攔截關閉/重新整理
+        let leaveAction = null;
+        window.addEventListener('unload', function(e) {
+            if (hasUnsaved && !leaveAction) {
+                // 若有未儲存變更且未選擇動作，阻止離開
+                e.preventDefault();
+                return false;
+            }
+        });
+
+        async function renderAccounts() {
+            await fetchAccounts();
+            const container = document.getElementById('accounts');
+            container.innerHTML = '';
+            accounts.forEach((acc, idx) => {
+                const isEditing = editIndex === idx;
+                const accountData = isEditing ? editAccount : acc;
+                const { total, history } = calcWithRecords(accountData.records, accountData.rate);
+                const div = document.createElement('div');
+                div.className = 'account-card';
+                if (isEditing) {
+                    hasUnsaved = true;
+                    div.innerHTML = `
+                        <label>存款人：<input type="text" value="${accountData.name}" id="edit-name"></label><br>
+                        <label>月利率（%）：<input type="number" value="${accountData.rate}" min="0" step="0.01" id="edit-rate" style="width:80px"></label><br>
+                        <strong>本金加利息總額：</strong>${formatTWD(total)}<br>
+                        <button id="save-edit">確認儲存</button>
+                        <button id="cancel-edit">取消</button>
+                        <div style="margin-top:10px;">
+                            <strong>存款紀錄：</strong>
+                            <table border="1" cellpadding="4" style="width:100%;margin-top:5px;font-size:0.95em;">
+                                <thead><tr><th>日期</th><th>類型</th><th>金額</th><th>操作</th></tr></thead>
+                                <tbody>
+                                    ${accountData.records.map((rec, i) => `
+                                        <tr>
+                                            <td><input type="date" value="${rec.date}" data-rec-idx="${i}" class="edit-date"></td>
+                                            <td><select data-rec-idx="${i}" class="edit-type">
+                                                <option value="存入" ${rec.type==='存入'?'selected':''}>存入</option>
+                                                <option value="領出" ${rec.type==='領出'?'selected':''}>領出</option>
+                                            </select></td>
+                                            <td><input type="number" min="1" value="${rec.amount}" data-rec-idx="${i}" class="edit-amount"></td>
+                                            <td><button class="del-rec" data-rec-idx="${i}">刪除</button></td>
+                                        </tr>
+                                    `).join('')}
+                                    <tr>
+                                        <td><input type="date" id="new-rec-date"></td>
+                                        <td><select id="new-rec-type"><option value="存入">存入</option><option value="領出">領出</option></select></td>
+                                        <td><input type="number" min="1" id="new-rec-amount"></td>
+                                        <td><button id="add-rec">新增</button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                } else {
+                    div.innerHTML = `
+                        <strong>存款人：</strong>${acc.name}<br>
+                        <label>月利率（%）：<input type="number" value="${acc.rate}" min="0" step="0.01" data-idx="${idx}" style="width:80px"></label><br>
+                        <strong>本金加利息總額：</strong>${formatTWD(total)}<br>
+                        <button data-del="${idx}">刪除存款人</button>
+                        <button data-edit="${idx}">編輯</button>
+                        <form data-addrec="${idx}" style="margin-top:10px;">
+                            <label>日期 <input type="date" required></label>
+                            <label>類型 <select><option value="存入">存入</option><option value="領出">領出</option></select></label>
+                            <label>金額 <input type="number" min="1" required></label>
+                            <button type="submit">新增紀錄</button>
+                        </form>
+                        <div style="margin-top:10px;">
+                            <strong>存款紀錄：</strong>
+                            <table border="1" cellpadding="4" style="width:100%;margin-top:5px;font-size:0.95em;">
+                                <thead><tr><th>日期</th><th>類型</th><th>金額</th><th>計息後餘額</th></tr></thead>
+                                <tbody>
+                                    ${history.map(h => `<tr><td>${h.date}</td><td>${h.type}</td><td>${formatTWD(h.amount)}</td><td>${formatTWD(h.balance)}</td></tr>`).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                }
+                container.appendChild(div);
+                if (isEditing) {
+                    div.querySelector('#edit-name').addEventListener('input', e => {
+                        editAccount.name = e.target.value;
+                    });
+                    div.querySelector('#edit-rate').addEventListener('input', e => {
+                        editAccount.rate = parseFloat(e.target.value);
+                    });
+                    div.querySelectorAll('.edit-date').forEach(input => {
+                        input.addEventListener('input', e => {
+                            const i = parseInt(e.target.getAttribute('data-rec-idx'));
+                            editAccount.records[i].date = e.target.value;
+                        });
+                    });
+                    div.querySelectorAll('.edit-type').forEach(sel => {
+                        sel.addEventListener('change', e => {
+                            const i = parseInt(e.target.getAttribute('data-rec-idx'));
+                            editAccount.records[i].type = e.target.value;
+                        });
+                    });
+                    div.querySelectorAll('.edit-amount').forEach(input => {
+                        input.addEventListener('input', e => {
+                            const i = parseInt(e.target.getAttribute('data-rec-idx'));
+                            editAccount.records[i].amount = parseFloat(e.target.value);
+                        });
+                    });
+                    div.querySelectorAll('.del-rec').forEach(btn => {
+                        btn.addEventListener('click', e => {
+                            const i = parseInt(e.target.getAttribute('data-rec-idx'));
+                            editAccount.records.splice(i, 1);
+                            renderAccounts();
+                        });
+                    });
+                    div.querySelector('#add-rec').addEventListener('click', e => {
+                        e.preventDefault();
+                        const date = div.querySelector('#new-rec-date').value;
+                        const type = div.querySelector('#new-rec-type').value;
+                        const amount = parseFloat(div.querySelector('#new-rec-amount').value);
+                        if (!date || isNaN(amount) || amount <= 0) return;
+                        editAccount.records.push({ date, type, amount });
+                        renderAccounts();
+                    });
+                    div.querySelector('#save-edit').addEventListener('click', async () => {
+                        await updateAccount(editIndex, editAccount);
+                        editIndex = null;
+                        editAccount = null;
+                        hasUnsaved = false;
+                        renderAccounts();
+                    });
+                    div.querySelector('#cancel-edit').addEventListener('click', () => {
+                        editIndex = null;
+                        editAccount = null;
+                        hasUnsaved = false;
+                        renderAccounts();
+                    });
+                }
+            });
+            container.querySelectorAll('input[type="number"]').forEach(input => {
+                if (input.hasAttribute('data-idx')) {
+                    input.addEventListener('input', async e => {
+                        const i = parseInt(e.target.getAttribute('data-idx'));
+                        accounts[i].rate = parseFloat(e.target.value);
+                        await updateAccount(i, accounts[i]);
+                        renderAccounts();
+                    });
+                }
+            });
+            container.querySelectorAll('button[data-del]').forEach(btn => {
+                btn.addEventListener('click', async e => {
+                    const i = parseInt(e.target.getAttribute('data-del'));
+                    await deleteAccount(i);
+                    renderAccounts();
+                });
+            });
+            container.querySelectorAll('button[data-edit]').forEach(btn => {
+                btn.addEventListener('click', e => {
+                    const i = parseInt(e.target.getAttribute('data-edit'));
+                    if (hasUnsaved) {
+                        showLeaveConfirm(function(action) {
+                            if (action === 'save') {
+                                updateAccount(editIndex, editAccount).then(() => {
+                                    editIndex = i;
+                                    editAccount = JSON.parse(JSON.stringify(accounts[i]));
+                                    hasUnsaved = false;
+                                    renderAccounts();
+                                });
+                            } else if (action === 'cancel') {
+                                editIndex = i;
+                                editAccount = JSON.parse(JSON.stringify(accounts[i]));
+                                hasUnsaved = false;
+                                renderAccounts();
+                            } else if (action === 'exit') {
+                                editIndex = null;
+                                editAccount = null;
+                                hasUnsaved = false;
+                                renderAccounts();
+                            }
+                        });
+                    } else {
+                        editIndex = i;
+                        editAccount = JSON.parse(JSON.stringify(accounts[i]));
+                        renderAccounts();
+                    }
+                });
+            });
+            container.querySelectorAll('form[data-addrec]').forEach(form => {
+                form.addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    const i = parseInt(form.getAttribute('data-addrec'));
+                    const date = form.querySelector('input[type="date"]').value;
+                    const type = form.querySelector('select').value;
+                    const amount = parseFloat(form.querySelector('input[type="number"]').value);
+                    if (!date || isNaN(amount) || amount <= 0) return;
+                    accounts[i].records.push({ date, type, amount });
+                    await updateAccount(i, accounts[i]);
+                    renderAccounts();
+                });
+            });
+        }
+
+        document.getElementById('add-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const name = document.getElementById('name').value.trim();
+            const rate = parseFloat(document.getElementById('rate').value);
+            if (!name || isNaN(rate)) return;
+            await addAccount(name, rate);
+            this.reset();
+            renderAccounts();
+        });
+
+        renderAccounts();
+    </script>
+</body>
+</html> 
